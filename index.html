@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NoCode ETL · AI Agent Pipeline</title>
+  <meta name="description" content="Convert SQL queries or mapping sheets to production PySpark ETL pipelines using 5 AI agents. Includes validation, unit tests, and Airflow DAG generation." />
+  <!-- Open Graph for LinkedIn preview -->
+  <meta property="og:title" content="NoCode ETL · AI Agent Pipeline" />
+  <meta property="og:description" content="Convert SQL → PySpark in seconds using 5 AI agents. Validation, unit tests & Airflow DAG included." />
+  <meta property="og:type" content="website" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0c10; font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0a0c10; }
+    ::-webkit-scrollbar-thumb { background: #2a3347; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const C = {
+      bg:"#0a0c10",surface:"#111318",surfaceHigh:"#181c24",
+      border:"#1e2433",accent:"#00d4ff",accentGlow:"rgba(0,212,255,0.15)",
+      green:"#00ff88",orange:"#ff8c42",red:"#ff4466",purple:"#a855f7",
+      text:"#e2e8f0",textMid:"#94a3b8",textDim:"#4a5568",
+    };
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    function extractJSON(raw) {
+      let s = raw.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+      const si = Math.min(
+        s.indexOf("{") === -1 ? Infinity : s.indexOf("{"),
+        s.indexOf("[") === -1 ? Infinity : s.indexOf("[")
+      );
+      if (si === Infinity) throw new Error("No JSON found in response");
+      s = s.slice(si);
+      try { return JSON.parse(s); } catch(_) {}
+      let repaired = s.replace(/,\s*([\]}])/g,"$1");
+      let depth=0,inStr=false,esc=false;
+      for (let i=0;i<repaired.length;i++) {
+        const ch=repaired[i];
+        if(esc){esc=false;continue;}
+        if(ch==="\\"&&inStr){esc=true;continue;}
+        if(ch==='"'){inStr=!inStr;continue;}
+        if(inStr)continue;
+        if(ch==="{"||ch==="[")depth++;
+        if(ch==="}"||ch==="]")depth--;
+      }
+      while(depth>0){repaired+="}";depth--;}
+      try{return JSON.parse(repaired);}catch(e2){throw new Error(`JSON repair failed: ${e2.message}`);}
+    }
+
+    const Badge = ({color,children}) => (
+      <span style={{background:color+"22",color,border:`1px solid ${color}44`,borderRadius:4,padding:"2px 8px",fontSize:11,fontWeight:700,letterSpacing:"0.05em",fontFamily:"monospace",whiteSpace:"nowrap"}}>{children}</span>
+    );
+
+    const Btn = ({onClick,disabled,children,color=C.accent,small}) => (
+      <button onClick={onClick} disabled={disabled} style={{background:disabled?"#1a1f2e":`linear-gradient(135deg,${color}22,${color}11)`,border:`1px solid ${disabled?C.border:color}`,color:disabled?C.textDim:color,padding:small?"5px 12px":"9px 18px",borderRadius:7,cursor:disabled?"not-allowed":"pointer",fontSize:small?11:13,fontWeight:700,letterSpacing:"0.05em",fontFamily:"monospace",transition:"all 0.2s",boxShadow:disabled?"none":`0 0 10px ${color}33`}}>{children}</button>
+    );
+
+    const Card = ({children,style={}}) => (
+      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:20,...style}}>{children}</div>
+    );
+
+    const STitle = ({icon,title,sub}) => (
+      <div style={{marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:17}}>{icon}</span>
+          <span style={{color:C.text,fontSize:14,fontWeight:700,letterSpacing:"0.04em"}}>{title}</span>
+        </div>
+        {sub&&<div style={{color:C.textDim,fontSize:11,marginTop:3,marginLeft:25}}>{sub}</div>}
+      </div>
+    );
+
+    const AGENT_COLORS = {SQL_PARSER:C.accent,PYSPARK_GEN:C.green,VALIDATOR:C.orange,TEST_RUNNER:C.purple,ORCHESTRATOR:C.textMid};
+
+    const AgentLog = ({logs}) => {
+      const ref = useRef();
+      useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;},[logs]);
+      return (
+        <div ref={ref} style={{background:"#07090e",border:`1px solid ${C.border}`,borderRadius:8,padding:12,height:200,overflowY:"auto",fontFamily:"monospace",fontSize:11}}>
+          {logs.length===0
+            ?<span style={{color:C.textDim}}>Awaiting agent activity…</span>
+            :logs.map((l,i)=>(
+              <div key={i} style={{marginBottom:3,lineHeight:1.65}}>
+                <span style={{color:C.textDim}}>[{l.ts}]&nbsp;</span>
+                <span style={{color:AGENT_COLORS[l.agent]||C.textMid}}>[{l.agent}]</span>
+                <span style={{color:l.type==="error"?C.red:l.type==="success"?C.green:C.text}}>&nbsp;{l.msg}</span>
+              </div>
+            ))}
+        </div>
+      );
+    };
+
+    const STAGES=[
+      {id:"ingest",icon:"⬇",label:"INGEST",sub:"SQL/Mapping"},
+      {id:"parse",icon:"🧠",label:"PARSE",sub:"Parser Agent"},
+      {id:"generate",icon:"⚡",label:"GENERATE",sub:"PySpark Agent"},
+      {id:"validate",icon:"🔍",label:"VALIDATE",sub:"Validator Agent"},
+      {id:"test",icon:"🧪",label:"TEST",sub:"Test Agent"},
+      {id:"orchestrate",icon:"🚀",label:"DEPLOY",sub:"Orch. Agent"},
+    ];
+
+    const PipelineFlow = ({activeStage}) => {
+      const idx = STAGES.findIndex(s=>s.id===activeStage);
+      return (
+        <div style={{display:"flex",alignItems:"center",overflowX:"auto",padding:"6px 0"}}>
+          {STAGES.map((s,i)=>{
+            const done=i<idx,active=i===idx;
+            const col=done?C.green:active?C.accent:C.textDim;
+            return (
+              <div key={s.id} style={{display:"flex",alignItems:"center"}}>
+                <div style={{textAlign:"center",padding:"9px 10px",borderRadius:9,minWidth:76,background:active?C.accentGlow:done?"rgba(0,255,136,0.07)":"transparent",border:`1px solid ${col}${active?"bb":"44"}`,boxShadow:active?`0 0 14px ${C.accent}44`:"none",transition:"all 0.35s"}}>
+                  <div style={{fontSize:17,marginBottom:3}}>{s.icon}</div>
+                  <div style={{color:col,fontSize:9,fontWeight:800,letterSpacing:"0.08em"}}>{s.label}</div>
+                  <div style={{color:C.textDim,fontSize:8,marginTop:2}}>{s.sub}</div>
+                </div>
+                {i<STAGES.length-1&&<div style={{width:20,height:2,background:i<idx?C.green:C.border,transition:"background 0.5s",flexShrink:0}}/>}
+              </div>
+            );
+          })}
+        </div>
+      );
+    };
+
+    const CodeBlock = ({code,title}) => {
+      const [copied,setCopied]=useState(false);
+      const copy=()=>{navigator.clipboard?.writeText(code);setCopied(true);setTimeout(()=>setCopied(false),2000);};
+      return (
+        <div style={{borderRadius:9,overflow:"hidden",border:`1px solid ${C.border}`}}>
+          <div style={{background:C.surfaceHigh,padding:"7px 13px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{color:C.textMid,fontSize:11}}>{title}</span>
+            <Btn small onClick={copy} color={copied?C.green:C.textDim}>{copied?"✓ COPIED":"COPY"}</Btn>
+          </div>
+          <pre style={{background:"#07090e",margin:0,padding:14,overflowX:"auto",fontSize:11,lineHeight:1.7,color:C.text,fontFamily:"monospace",maxHeight:380,overflowY:"auto"}}><code>{code}</code></pre>
+        </div>
+      );
+    };
+
+    const SAMPLE_SQL=`-- Source: sales_db.orders + customers\n-- Target: dw.fact_orders\nSELECT\n    o.order_id, o.order_date, o.amount, o.status,\n    c.customer_id, c.customer_name, c.region, c.segment,\n    CASE WHEN o.amount > 1000 THEN 'HIGH'\n         WHEN o.amount > 500  THEN 'MEDIUM' ELSE 'LOW'\n    END AS order_tier,\n    CURRENT_TIMESTAMP AS load_ts\nFROM sales_db.orders o\nJOIN sales_db.customers c ON o.customer_id = c.customer_id\nWHERE o.order_date >= '2024-01-01'\n  AND o.status != 'CANCELLED';`;
+
+    const SAMPLE_MAPPING=`source_table,source_column,target_table,target_column,transformation,data_type,nullable,pk\nsales_db.orders,order_id,dw.fact_orders,order_id,direct,BIGINT,N,Y\nsales_db.orders,order_date,dw.fact_orders,order_date,direct,DATE,N,N\nsales_db.orders,amount,dw.fact_orders,order_amount,cast as DECIMAL,DECIMAL,N,N\nsales_db.customers,customer_id,dw.fact_orders,customer_id,direct,BIGINT,N,N\nsales_db.customers,customer_name,dw.fact_orders,customer_name,upper trim,VARCHAR,Y,N\nderived,,dw.fact_orders,order_tier,case amount tiers HIGH MED LOW,VARCHAR,N,N\nderived,,dw.fact_orders,load_ts,current_timestamp,TIMESTAMP,N,N`;
+
+    async function callClaude(system,user,addLog,agent,maxTokens,apiKey) {
+      addLog(agent,`Calling Claude API (max_tokens=${maxTokens})…`);
+      const res = await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system,messages:[{role:"user",content:user}]}),
+      });
+      if(!res.ok){const t=await res.text();throw new Error(`API ${res.status}: ${t.slice(0,150)}`);}
+      const data=await res.json();
+      if(data.error)throw new Error(data.error.message);
+      const text=(data.content||[]).map(b=>b.text||"").join("");
+      addLog(agent,`Received ${text.length} chars [stop=${data.stop_reason}]`);
+      return text;
+    }
+
+    async function agentSQLParser(input,inputType,addLog,apiKey) {
+      const system=`You are a SQL Parser Agent. Output ONLY a compact single-line JSON, no markdown, no explanation.\nSchema: {"pipeline_name":"string","description":"string","sources":[{"table":"string","alias":"string","columns":["c1"]}],"joins":[{"left":"string","right":"string","condition":"string","type":"INNER"}],"filters":["string"],"transformations":[{"target_col":"string","expression":"string","data_type":"string"}],"target":{"table":"string","write_mode":"overwrite"}}\nKeep strings under 50 chars. Max 6 items per array. Output ONLY JSON.`;
+      const raw=await callClaude(system,`Input type: ${inputType}\n\n${input}`,addLog,"SQL_PARSER",700,apiKey);
+      const spec=extractJSON(raw);
+      return {
+        pipeline_name:spec.pipeline_name||"etl_pipeline",
+        description:spec.description||"",
+        sources:Array.isArray(spec.sources)?spec.sources:[],
+        joins:Array.isArray(spec.joins)?spec.joins:[],
+        filters:Array.isArray(spec.filters)?spec.filters:[],
+        transformations:Array.isArray(spec.transformations)?spec.transformations:[],
+        target:spec.target||{table:"dw.target",write_mode:"overwrite"},
+      };
+    }
+
+    async function agentPySparkGen(spec,addLog,apiKey) {
+      const system=`You are a Senior PySpark Code Generation Agent. Generate concise production-grade PySpark ETL Python.\nApply: idempotency (overwrite+audit cols), schema enforcement, partitionBy date cols, broadcast() for dims, null checks, logging.\nReturn ONLY valid Python. No markdown. Max 90 lines.`;
+      const raw=await callClaude(system,`Generate PySpark ETL:\n${JSON.stringify(spec)}`,addLog,"PYSPARK_GEN",2000,apiKey);
+      return raw.replace(/```python\s*/gi,"").replace(/```\s*/g,"").trim();
+    }
+
+    async function agentValidator(pysparkCode,spec,addLog,apiKey) {
+      const system=`You are a Data Pipeline Validation Agent. Output ONLY compact single-line JSON, no markdown.\nSchema: {"score":85,"passed":["p1"],"warnings":["w1"],"errors":[],"dq_checks":[{"check":"Null safety","status":"PASS"}]}\nstatus: PASS WARN FAIL only. Max 4 items per array. Max 6 dq_checks. Strings under 50 chars. Output ONLY JSON.`;
+      const snippet=pysparkCode.slice(0,600);
+      const meta=`pipeline=${spec.pipeline_name} target=${spec.target?.table} sources=${spec.sources?.length} joins=${spec.joins?.length}`;
+      try {
+        const raw=await callClaude(system,`Code:\n${snippet}\nMeta: ${meta}`,addLog,"VALIDATOR",500,apiKey);
+        return extractJSON(raw);
+      } catch(e) {
+        addLog("VALIDATOR",`Using static analysis fallback (${e.message})`,"info");
+        return buildFallbackValidation(spec,pysparkCode);
+      }
+    }
+
+    function buildFallbackValidation(spec,code) {
+      const checks=[
+        {check:"Partition strategy",status:code.includes("partitionBy")?"PASS":"WARN"},
+        {check:"Broadcast join hint",status:code.includes("broadcast")?"PASS":"WARN"},
+        {check:"Idempotent write mode",status:code.includes("overwrite")?"PASS":"FAIL"},
+        {check:"Null safety",status:(code.includes("isNull")||code.includes("dropna"))?"PASS":"WARN"},
+        {check:"Source tables defined",status:spec.sources?.length>0?"PASS":"FAIL"},
+        {check:"Target table defined",status:spec.target?.table?"PASS":"FAIL"},
+      ];
+      const passed=checks.filter(c=>c.status==="PASS").map(c=>c.check);
+      const warnings=checks.filter(c=>c.status==="WARN").map(c=>c.check+" not detected");
+      const errors=checks.filter(c=>c.status==="FAIL").map(c=>c.check+" missing");
+      return {score:Math.round((passed.length/checks.length)*100),passed,warnings,errors,dq_checks:checks};
+    }
+
+    async function agentUnitTests(pysparkCode,spec,addLog,apiKey) {
+      const system=`You are a PySpark Unit Test Generation Agent. Generate concise pytest file using SparkSession.\nCover: schema validation, null handling, row count, transformation assertion.\nReturn ONLY valid Python. No markdown. Max 80 lines.`;
+      const raw=await callClaude(system,`Pipeline: ${spec.pipeline_name} Target: ${spec.target?.table}\nCode:\n${pysparkCode.slice(0,500)}`,addLog,"TEST_RUNNER",1800,apiKey);
+      return raw.replace(/```python\s*/gi,"").replace(/```\s*/g,"").trim();
+    }
+
+    async function agentOrchestration(spec,addLog,apiKey) {
+      const system=`You are a Pipeline Orchestration Agent. Generate concise Airflow 2 DAG using TaskFlow API.\nInclude: DQ gate task, SparkSubmitOperator, retries=3 retry_delay=5min, on_failure_callback email, XCom row count.\nReturn ONLY valid Python. No markdown. Max 80 lines.`;
+      const raw=await callClaude(system,`Pipeline: ${spec.pipeline_name} Target: ${spec.target?.table} Sources: ${spec.sources?.map(s=>s.table).join(", ")}`,addLog,"ORCHESTRATOR",1800,apiKey);
+      return raw.replace(/```python\s*/gi,"").replace(/```\s*/g,"").trim();
+    }
+
+    function App() {
+      const [apiKey,setApiKey]=useState(localStorage.getItem("anthropic_key")||"");
+      const [keySet,setKeySet]=useState(!!localStorage.getItem("anthropic_key"));
+      const [keyInput,setKeyInput]=useState("");
+      const [tab,setTab]=useState("sql");
+      const [sqlInput,setSqlInput]=useState(SAMPLE_SQL);
+      const [mappingInput,setMappingInput]=useState(SAMPLE_MAPPING);
+      const [stage,setStage]=useState("idle");
+      const [logs,setLogs]=useState([]);
+      const [spec,setSpec]=useState(null);
+      const [pysparkCode,setPysparkCode]=useState("");
+      const [testCode,setTestCode]=useState("");
+      const [dagCode,setDagCode]=useState("");
+      const [validation,setValidation]=useState(null);
+      const [error,setError]=useState(null);
+      const [outputTab,setOutputTab]=useState("spec");
+
+      const saveKey = () => {
+        if(!keyInput.trim())return;
+        localStorage.setItem("anthropic_key",keyInput.trim());
+        setApiKey(keyInput.trim());
+        setKeySet(true);
+      };
+      const clearKey = () => {
+        localStorage.removeItem("anthropic_key");
+        setApiKey(""); setKeyInput(""); setKeySet(false);
+      };
+
+      const addLog=(agent,msg,type="info")=>{
+        const now=new Date();
+        const ts=[now.getHours(),now.getMinutes(),now.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+        setLogs(prev=>[...prev,{ts,agent,msg,type}]);
+      };
+
+      const run=async()=>{
+        if(!apiKey){setError("Please enter your Anthropic API key first.");return;}
+        setLogs([]);setError(null);setSpec(null);setPysparkCode("");setTestCode("");setDagCode("");setValidation(null);
+        const input=tab==="sql"?sqlInput:mappingInput;
+        try {
+          setStage("ingest");addLog("ORCHESTRATOR","Pipeline run initiated");await sleep(250);
+          setStage("parse");addLog("SQL_PARSER",`Analyzing ${tab==="sql"?"SQL query":"mapping sheet"}…`);
+          const parsedSpec=await agentSQLParser(input,tab==="sql"?"SQL_QUERY":"MAPPING_CSV",addLog,apiKey);
+          setSpec(parsedSpec);addLog("SQL_PARSER",`Spec ready — "${parsedSpec.pipeline_name}"`,"success");setOutputTab("spec");
+          setStage("generate");addLog("PYSPARK_GEN","Generating PySpark ETL code…");
+          const pyspark=await agentPySparkGen(parsedSpec,addLog,apiKey);
+          setPysparkCode(pyspark);addLog("PYSPARK_GEN",`${pyspark.split("\n").length} lines generated`,"success");setOutputTab("pyspark");
+          setStage("validate");addLog("VALIDATOR","Running validation checks…");
+          const val=await agentValidator(pyspark,parsedSpec,addLog,apiKey);
+          setValidation(val);addLog("VALIDATOR",`Score ${val.score}/100 | ${val.errors?.length||0} errors | ${val.warnings?.length||0} warnings`,(val.errors?.length||0)>0?"error":"success");setOutputTab("validation");
+          setStage("test");addLog("TEST_RUNNER","Generating unit test suite…");
+          const tests=await agentUnitTests(pyspark,parsedSpec,addLog,apiKey);
+          setTestCode(tests);addLog("TEST_RUNNER",`${(tests.match(/def test_/g)||[]).length} test cases generated`,"success");setOutputTab("tests");
+          setStage("orchestrate");addLog("ORCHESTRATOR","Generating Airflow DAG…");
+          const dag=await agentOrchestration(parsedSpec,addLog,apiKey);
+          setDagCode(dag);addLog("ORCHESTRATOR","Airflow DAG ready","success");setOutputTab("dag");
+          setStage("done");addLog("ORCHESTRATOR","✅ All 5 agents completed — pipeline ready!","success");
+        } catch(e) {
+          setError(e.message);addLog("ORCHESTRATOR",`❌ ${e.message}`,"error");setStage("idle");
+        }
+      };
+
+      const isRunning=!["idle","done"].includes(stage);
+      const outTabs=[
+        {id:"spec",label:"📋 SPEC",show:!!spec},
+        {id:"pyspark",label:"⚡ PYSPARK",show:!!pysparkCode},
+        {id:"validation",label:"🔍 VALIDATION",show:!!validation},
+        {id:"tests",label:"🧪 TESTS",show:!!testCode},
+        {id:"dag",label:"🚀 AIRFLOW DAG",show:!!dagCode},
+      ].filter(t=>t.show);
+
+      return (
+        <div style={{background:C.bg,minHeight:"100vh",color:C.text,padding:"22px 18px"}}>
+          <div style={{maxWidth:1100,margin:"0 auto"}}>
+
+            {/* Header */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:26}}>
+              <div style={{display:"flex",alignItems:"center",gap:12}}>
+                <div style={{width:38,height:38,borderRadius:9,background:`linear-gradient(135deg,${C.accent},${C.purple})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:19,boxShadow:`0 0 18px ${C.accent}44`}}>⚡</div>
+                <div>
+                  <div style={{fontSize:20,fontWeight:800,background:`linear-gradient(90deg,${C.accent},${C.green})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent"}}>NoCode ETL · Agent Pipeline</div>
+                  <div style={{color:C.textDim,fontSize:10,letterSpacing:"0.08em"}}>SQL / MAPPING → PYSPARK → VALIDATE → TEST → ORCHESTRATE</div>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                <Badge color={C.accent}>CLAUDE SONNET 4</Badge>
+                <Badge color={C.green}>5 AGENTS</Badge>
+              </div>
+            </div>
+
+            {/* API Key box */}
+            <Card style={{marginBottom:16,padding:"14px 18px",border:`1px solid ${keySet?C.green+"44":C.orange+"44"}`}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+                <span style={{fontSize:15}}>🔑</span>
+                <span style={{color:C.text,fontSize:13,fontWeight:700}}>Anthropic API Key</span>
+                {keySet
+                  ? <><Badge color={C.green}>✓ KEY SET</Badge><span style={{color:C.textDim,fontSize:11}}>Your key is stored in browser localStorage only.</span><Btn small onClick={clearKey} color={C.red}>CLEAR KEY</Btn></>
+                  : <>
+                      <input
+                        type="password" placeholder="sk-ant-api03-…" value={keyInput}
+                        onChange={e=>setKeyInput(e.target.value)}
+                        onKeyDown={e=>e.key==="Enter"&&saveKey()}
+                        style={{flex:1,minWidth:240,background:"#07090e",border:`1px solid ${C.border}`,borderRadius:6,color:C.text,padding:"6px 11px",fontSize:12,fontFamily:"monospace",outline:"none"}}
+                      />
+                      <Btn small onClick={saveKey} color={C.accent}>SAVE KEY</Btn>
+                      <span style={{color:C.textDim,fontSize:10}}>Get yours at <a href="https://console.anthropic.com" target="_blank" style={{color:C.accent}}>console.anthropic.com</a></span>
+                    </>
+                }
+              </div>
+            </Card>
+
+            {/* Pipeline flow */}
+            <Card style={{marginBottom:16,padding:"13px 16px"}}>
+              <PipelineFlow activeStage={stage==="idle"?undefined:stage}/>
+            </Card>
+
+            {/* Input + Log */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:16}}>
+              <Card>
+                <STitle icon="⬇" title="INPUT SOURCE" sub="Paste SQL query or source-to-target mapping sheet (CSV)"/>
+                <div style={{display:"flex",gap:7,marginBottom:10}}>
+                  {["sql","mapping"].map(t=>(
+                    <Btn key={t} small onClick={()=>setTab(t)} color={tab===t?C.accent:C.textDim}>{t==="sql"?"SQL QUERY":"MAPPING SHEET"}</Btn>
+                  ))}
+                </div>
+                <textarea value={tab==="sql"?sqlInput:mappingInput} onChange={e=>tab==="sql"?setSqlInput(e.target.value):setMappingInput(e.target.value)}
+                  style={{width:"100%",height:230,background:"#07090e",border:`1px solid ${C.border}`,borderRadius:7,color:C.text,padding:11,fontSize:11,lineHeight:1.7,fontFamily:"monospace",resize:"vertical",outline:"none",boxSizing:"border-box"}}/>
+                <div style={{marginTop:11,display:"flex",alignItems:"center",gap:12}}>
+                  <Btn onClick={run} disabled={isRunning} color={C.accent}>{isRunning?`⟳  ${stage.toUpperCase()}…`:"▶  RUN ALL AGENTS"}</Btn>
+                  {stage==="done"&&<Badge color={C.green}>✓ COMPLETE</Badge>}
+                </div>
+                {error&&<div style={{marginTop:10,padding:"9px 12px",background:C.red+"11",border:`1px solid ${C.red}44`,borderRadius:7,color:C.red,fontSize:11,lineHeight:1.6,wordBreak:"break-word"}}>❌ {error}</div>}
+              </Card>
+              <Card>
+                <STitle icon="🤖" title="AGENT ACTIVITY LOG" sub="Real-time execution trace across all agents"/>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:9}}>
+                  {Object.entries(AGENT_COLORS).map(([a,c])=><Badge key={a} color={c}>{a}</Badge>)}
+                </div>
+                <AgentLog logs={logs}/>
+              </Card>
+            </div>
+
+            {/* Outputs */}
+            {outTabs.length>0&&(
+              <Card style={{marginBottom:16}}>
+                <div style={{display:"flex",gap:7,marginBottom:16,flexWrap:"wrap"}}>
+                  {outTabs.map(t=><Btn key={t.id} small onClick={()=>setOutputTab(t.id)} color={outputTab===t.id?C.accent:C.textDim}>{t.label}</Btn>)}
+                </div>
+
+                {outputTab==="spec"&&spec&&(
+                  <div>
+                    <STitle icon="📋" title="PIPELINE SPECIFICATION" sub="Extracted by SQL Parser Agent"/>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(185px,1fr))",gap:9,marginBottom:14}}>
+                      {[["Pipeline",spec.pipeline_name],["Target",spec.target?.table],["Write Mode",spec.target?.write_mode],["Sources",spec.sources?.map(s=>s.table).join(", ")||"—"],["Joins",(spec.joins?.length||0)+" join(s)"],["Transforms",(spec.transformations?.length||0)+" cols"]].map(([k,v])=>(
+                        <div key={k} style={{background:C.surfaceHigh,borderRadius:7,padding:"9px 12px",border:`1px solid ${C.border}`}}>
+                          <div style={{color:C.textDim,fontSize:9,letterSpacing:"0.1em",marginBottom:3}}>{k.toUpperCase()}</div>
+                          <div style={{color:C.text,fontSize:12,fontWeight:700,wordBreak:"break-all"}}>{v||"—"}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <CodeBlock code={JSON.stringify(spec,null,2)} title="pipeline-spec.json"/>
+                  </div>
+                )}
+
+                {outputTab==="pyspark"&&pysparkCode&&(
+                  <div><STitle icon="⚡" title="GENERATED PYSPARK ETL" sub="Production-grade code by PySpark Generator Agent"/><CodeBlock code={pysparkCode} title="etl_pipeline.py"/></div>
+                )}
+
+                {outputTab==="validation"&&validation&&(
+                  <div>
+                    <STitle icon="🔍" title="PIPELINE VALIDATION REPORT" sub="Code review & DQ analysis by Validation Agent"/>
+                    <div style={{display:"flex",gap:14,marginBottom:14,flexWrap:"wrap",alignItems:"flex-start"}}>
+                      <div style={{background:C.surfaceHigh,borderRadius:10,padding:"12px 18px",border:`2px solid ${validation.score>=80?C.green:validation.score>=60?C.orange:C.red}`,textAlign:"center",minWidth:96}}>
+                        <div style={{fontSize:34,fontWeight:900,lineHeight:1,color:validation.score>=80?C.green:validation.score>=60?C.orange:C.red}}>{validation.score}</div>
+                        <div style={{color:C.textDim,fontSize:9,marginTop:4}}>QUALITY SCORE</div>
+                      </div>
+                      <div style={{flex:1}}>
+                        {[["✅ Passed",validation.passed,C.green],["⚠️ Warnings",validation.warnings,C.orange],["❌ Errors",validation.errors,C.red]].map(([label,items,color])=>(
+                          items?.length>0&&(
+                            <div key={label} style={{marginBottom:8}}>
+                              <div style={{color,fontSize:10,fontWeight:700,marginBottom:3}}>{label} ({items.length})</div>
+                              {items.map((item,i)=><div key={i} style={{color:C.textMid,fontSize:11,paddingLeft:8,borderLeft:`2px solid ${color}44`,marginBottom:2}}>{item}</div>)}
+                            </div>
+                          )
+                        ))}
+                      </div>
+                    </div>
+                    {validation.dq_checks?.length>0&&(
+                      <div>
+                        <div style={{color:C.textDim,fontSize:10,marginBottom:8}}>DATA QUALITY CHECKS</div>
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:7}}>
+                          {validation.dq_checks.map((c,i)=>{
+                            const col=c.status==="PASS"?C.green:c.status==="WARN"?C.orange:C.red;
+                            return <div key={i} style={{background:C.surfaceHigh,borderRadius:7,padding:"8px 11px",border:`1px solid ${col}33`,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{color:C.text,fontSize:11}}>{c.check}</span><Badge color={col}>{c.status}</Badge></div>;
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {outputTab==="tests"&&testCode&&(
+                  <div><STitle icon="🧪" title="UNIT TEST SUITE" sub="pytest + PySpark tests by Unit Test Agent"/><CodeBlock code={testCode} title="test_etl_pipeline.py"/></div>
+                )}
+
+                {outputTab==="dag"&&dagCode&&(
+                  <div>
+                    <STitle icon="🚀" title="AIRFLOW ORCHESTRATION DAG" sub="Auto-generated by Orchestration Agent"/>
+                    <div style={{display:"flex",gap:6,marginBottom:11,flexWrap:"wrap"}}>
+                      {["Retry 3×","SLA Alerts","XCom Metrics","Email Notify","DQ Gate"].map(f=><Badge key={f} color={C.green}>{f}</Badge>)}
+                    </div>
+                    <CodeBlock code={dagCode} title="dag_etl_pipeline.py"/>
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {/* Architecture */}
+            <Card>
+              <STitle icon="🏗" title="ARCHITECTURE" sub="5-agent design — all data pipeline principles enforced"/>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(185px,1fr))",gap:9,marginBottom:13}}>
+                {[
+                  {icon:"🧠",title:"SQL Parser Agent",desc:"Sources, joins, filters, transforms → compact JSON spec",color:C.accent},
+                  {icon:"⚡",title:"PySpark Gen Agent",desc:"Idempotent PySpark: partitioning, broadcast hints, DQ inline",color:C.green},
+                  {icon:"🔍",title:"Validation Agent",desc:"Scores 0-100: null safety, write mode, joins, partitions",color:C.orange},
+                  {icon:"🧪",title:"Unit Test Agent",desc:"pytest suite: schema, nulls, row counts, edge cases",color:C.purple},
+                  {icon:"🚀",title:"Orchestration Agent",desc:"Airflow DAG: retries, SLA, XCom row counts, failure email",color:C.red},
+                ].map(a=>(
+                  <div key={a.title} style={{background:C.surfaceHigh,borderRadius:9,padding:12,border:`1px solid ${a.color}33`}}>
+                    <div style={{fontSize:19,marginBottom:5}}>{a.icon}</div>
+                    <div style={{color:a.color,fontSize:11,fontWeight:700,marginBottom:4}}>{a.title}</div>
+                    <div style={{color:C.textDim,fontSize:10,lineHeight:1.6}}>{a.desc}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{padding:12,background:"#07090e",borderRadius:7,border:`1px solid ${C.border}`}}>
+                <div style={{color:C.textDim,fontSize:9,letterSpacing:"0.1em",marginBottom:7}}>PIPELINE DESIGN PRINCIPLES</div>
+                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                  {["Idempotency","Schema Enforcement","Partition Pruning","Broadcast Joins","Null Safety","Type Safety","DQ Gates","Retry Logic","SLA Monitoring","Audit Columns","Incremental Load","Write-Audit-Publish"].map(p=>(
+                    <Badge key={p} color={C.textDim}>{p}</Badge>
+                  ))}
+                </div>
+              </div>
+            </Card>
+
+            <div style={{textAlign:"center",marginTop:20,color:C.textDim,fontSize:10}}>
+              Built with Claude Sonnet 4 · Your API key is stored locally and never shared · <a href="https://console.anthropic.com" target="_blank" style={{color:C.accent}}>Get API key</a>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
